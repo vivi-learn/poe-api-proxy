@@ -4,7 +4,6 @@ import cors from 'cors';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// CORS 설정 - Vercel 도메인 허용
 app.use(cors({
   origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
   credentials: true,
@@ -13,15 +12,19 @@ app.use(cors({
 app.use(express.json());
 
 // ============================================
-// Rate Limiting 설정
+// 강화된 Rate Limiting
 // ============================================
 let lastStatsRequest = 0;
 let lastSearchRequest = 0;
 let lastFetchRequest = 0;
-const MIN_DELAY = 2000; // 2초
+const MIN_DELAY = 5000; // 5초로 증가 (더 안전하게)
+
+// 요청 카운터 (디버깅용)
+let statsRequestCount = 0;
+let searchRequestCount = 0;
 
 // ============================================
-// Stats 캐시
+// Stats 캐시 (더 긴 TTL)
 // ============================================
 interface CacheEntry {
   data: any;
@@ -29,26 +32,29 @@ interface CacheEntry {
 }
 
 let statsCache: CacheEntry | null = null;
-const STATS_CACHE_TTL = 24 * 60 * 60 * 1000; // 24시간
+const STATS_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7일 (Stats는 거의 안 바뀜)
 
 // ============================================
-// Utility: Rate Limited Fetch
+// Rate Limited Fetch (더 안전하게)
 // ============================================
 async function rateLimitedFetch(
   url: string,
   options: RequestInit,
-  lastRequestRef: { value: number }
+  lastRequestRef: { value: number },
+  minDelay: number = MIN_DELAY
 ): Promise<Response> {
   const now = Date.now();
   const timeSince = now - lastRequestRef.value;
   
-  if (timeSince < MIN_DELAY) {
-    const waitTime = MIN_DELAY - timeSince;
-    console.log(`⏱️  Rate limiting: waiting ${waitTime}ms`);
+  if (timeSince < minDelay) {
+    const waitTime = minDelay - timeSince;
+    console.log(`⏱️  Rate limiting: waiting ${waitTime}ms before ${url}`);
     await new Promise(resolve => setTimeout(resolve, waitTime));
   }
   
   lastRequestRef.value = Date.now();
+  console.log(`🌐 Fetching: ${url}`);
+  
   return fetch(url, options);
 }
 
@@ -60,6 +66,11 @@ app.get('/', (req, res) => {
     status: 'ok',
     service: 'PoE Trade API Proxy',
     timestamp: new Date().toISOString(),
+    stats: {
+      statsRequests: statsRequestCount,
+      searchRequests: searchRequestCount,
+      cacheAge: statsCache ? Date.now() - statsCache.timestamp : null,
+    },
     endpoints: {
       stats: 'GET /api/poe/stats',
       search: 'POST /api/poe/search',
@@ -80,16 +91,23 @@ app.get('/health', (req, res) => {
 // ============================================
 app.get('/api/poe/stats', async (req, res) => {
   try {
+    statsRequestCount++;
     const now = Date.now();
     
-    // 캐시 확인
+    console.log(`📊 [Stats #${statsRequestCount}] Request received`);
+    
+    // 캐시 확인 (우선순위)
     if (statsCache && (now - statsCache.timestamp) < STATS_CACHE_TTL) {
-      console.log('📦 [Stats] Returning cached data');
+      const cacheAge = Math.floor((now - statsCache.timestamp) / 1000 / 60);
+      console.log(`📦 [Stats] Returning cached data (age: ${cacheAge} minutes)`);
+      res.setHeader('X-Cache', 'HIT');
+      res.setHeader('X-Cache-Age', cacheAge.toString());
       return res.json(statsCache.data);
     }
     
-    console.log('🔍 [Stats] Fetching from PoE API...');
+    console.log('🔍 [Stats] Cache miss, fetching from PoE API...');
     
+    // PoE API 호출
     const response = await rateLimitedFetch(
       'https://www.pathofexile.com/api/trade/data/stats',
       {
@@ -97,22 +115,29 @@ app.get('/api/poe/stats', async (req, res) => {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           'Accept': 'application/json',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Referer': 'https://www.pathofexile.com/trade',
         },
       },
-      { value: lastStatsRequest }
+      { value: lastStatsRequest },
+      MIN_DELAY
     );
     
     if (!response.ok) {
-      console.error(`❌ [Stats] PoE API Error: ${response.status}`);
+      console.error(`❌ [Stats] PoE API Error: ${response.status} ${response.statusText}`);
       
-      // 오래된 캐시라도 반환
-      if (statsCache) {
-        console.log('📦 [Stats] Returning stale cache due to error');
+      // 403이고 캐시가 있으면 오래된 캐시라도 반환
+      if (response.status === 403 && statsCache) {
+        const cacheAge = Math.floor((now - statsCache.timestamp) / 1000 / 60 / 60);
+        console.log(`📦 [Stats] Returning stale cache (age: ${cacheAge} hours) due to 403`);
+        res.setHeader('X-Cache', 'STALE');
+        res.setHeader('X-Cache-Age', cacheAge.toString());
         return res.json(statsCache.data);
       }
       
       return res.status(response.status).json({
         error: `PoE API returned ${response.status}`,
+        message: response.statusText,
       });
     }
     
@@ -122,14 +147,17 @@ app.get('/api/poe/stats', async (req, res) => {
     statsCache = { data, timestamp: now };
     console.log('✅ [Stats] Successfully fetched and cached');
     
+    res.setHeader('X-Cache', 'MISS');
     return res.json(data);
     
   } catch (error: any) {
     console.error('💥 [Stats] Exception:', error.message);
     
-    // 예외 발생 시 오래된 캐시라도 반환
+    // 예외 발생 시에도 캐시 반환
     if (statsCache) {
-      console.log('📦 [Stats] Returning stale cache after exception');
+      const cacheAge = Math.floor((Date.now() - statsCache.timestamp) / 1000 / 60 / 60);
+      console.log(`📦 [Stats] Returning stale cache (age: ${cacheAge} hours) after exception`);
+      res.setHeader('X-Cache', 'ERROR-STALE');
       return res.json(statsCache.data);
     }
     
@@ -145,7 +173,10 @@ app.get('/api/poe/stats', async (req, res) => {
 // ============================================
 app.post('/api/poe/search', async (req, res) => {
   try {
+    searchRequestCount++;
     const { league, query, sort, limit } = req.body;
+    
+    console.log(`🔍 [Search #${searchRequestCount}] Request received for ${league || 'Standard'}`);
     
     if (!query) {
       return res.status(400).json({ error: 'Query is required' });
@@ -153,8 +184,6 @@ app.post('/api/poe/search', async (req, res) => {
     
     const encodedLeague = encodeURIComponent(league || 'Standard');
     const searchUrl = `https://www.pathofexile.com/api/trade/search/${encodedLeague}`;
-    
-    console.log(`🔍 [Search] Searching in ${league || 'Standard'}...`);
     
     // 검색 요청
     const searchResponse = await rateLimitedFetch(
@@ -164,14 +193,27 @@ app.post('/api/poe/search', async (req, res) => {
         headers: {
           'Content-Type': 'application/json',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept': 'application/json',
         },
         body: JSON.stringify({ query, sort }),
       },
-      { value: lastSearchRequest }
+      { value: lastSearchRequest },
+      MIN_DELAY
     );
     
     if (!searchResponse.ok) {
       console.error(`❌ [Search] PoE API Error: ${searchResponse.status}`);
+      
+      // 429 (Too Many Requests) 처리
+      if (searchResponse.status === 429) {
+        console.log('⚠️ [Search] Rate limited by PoE API, will retry after longer delay');
+        return res.status(429).json({
+          error: 'Rate limited',
+          message: 'Too many requests, please try again later',
+          retryAfter: 60, // 60초 후 재시도
+        });
+      }
+      
       return res.status(searchResponse.status).json({
         error: `PoE API returned ${searchResponse.status}`,
       });
@@ -179,7 +221,7 @@ app.post('/api/poe/search', async (req, res) => {
     
     const searchData = await searchResponse.json();
     
-    // 아이템 상세 정보 가져오기
+    // 아이템 상세 정보
     if (searchData.result && searchData.result.length > 0) {
       const actualLimit = Math.min(Math.max(1, limit || 10), 10);
       const resultIds = searchData.result.slice(0, actualLimit);
@@ -195,7 +237,8 @@ app.post('/api/poe/search', async (req, res) => {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           },
         },
-        { value: lastFetchRequest }
+        { value: lastFetchRequest },
+        MIN_DELAY
       );
       
       if (fetchResponse.ok) {
@@ -253,8 +296,7 @@ app.use((req, res) => {
 // ============================================
 app.listen(PORT, () => {
   console.log(`🚀 PoE API Proxy running on port ${PORT}`);
-  console.log(`📡 Health check: http://localhost:${PORT}/health`);
-  console.log(`📊 Stats API: http://localhost:${PORT}/api/poe/stats`);
-  console.log(`🔍 Search API: http://localhost:${PORT}/api/poe/search`);
+  console.log(`📡 Health: http://localhost:${PORT}/health`);
+  console.log(`📊 Stats: http://localhost:${PORT}/api/poe/stats`);
+  console.log(`🔍 Search: http://localhost:${PORT}/api/poe/search`);
 });
-
