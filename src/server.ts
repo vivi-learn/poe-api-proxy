@@ -4,10 +4,16 @@ import cors from 'cors';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// CORS 설정 - 모든 출처 허용 (개발 중)
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || '*',
+  origin: '*', // 일단 모든 출처 허용
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
   credentials: true,
 }));
+
+// Preflight 요청 처리
+app.options('*', cors());
 
 app.use(express.json());
 
