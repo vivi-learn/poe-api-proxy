@@ -18,28 +18,12 @@ app.use(express.json());
 // ============================================
 // Rate Limiting
 // ============================================
-let lastPoe1StatsRequest = 0;
-let lastPoe2StatsRequest = 0;
 let lastSearchRequest = 0;
 let lastFetchRequest = 0;
 const MIN_DELAY = 5000; // 5초
 
 // 요청 카운터
-let poe1StatsRequestCount = 0;
-let poe2StatsRequestCount = 0;
 let searchRequestCount = 0;
-
-// ============================================
-// 캐시
-// ============================================
-interface CacheEntry {
-  data: any;
-  timestamp: number;
-}
-
-let poe1StatsCache: CacheEntry | null = null;
-let poe2StatsCache: CacheEntry | null = null;
-const STATS_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7일
 
 // ============================================
 // Rate Limited Fetch
@@ -74,15 +58,9 @@ app.get('/', (req, res) => {
     service: 'PoE Trade API Proxy',
     timestamp: new Date().toISOString(),
     stats: {
-      poe1StatsRequests: poe1StatsRequestCount,
-      poe2StatsRequests: poe2StatsRequestCount,
       searchRequests: searchRequestCount,
-      poe1CacheAge: poe1StatsCache ? Date.now() - poe1StatsCache.timestamp : null,
-      poe2CacheAge: poe2StatsCache ? Date.now() - poe2StatsCache.timestamp : null,
     },
     endpoints: {
-      poe1Stats: 'GET /api/poe/stats',
-      poe2Stats: 'GET /api/poe2/stats',
       search: 'POST /api/poe/search (PoE1)',
       searchPoe2: 'POST /api/poe2/search',
     },
@@ -94,139 +72,6 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     uptime: process.uptime(),
   });
-});
-
-// ============================================
-// PoE1 Stats API
-// ============================================
-app.get('/api/poe/stats', async (req, res) => {
-  try {
-    poe1StatsRequestCount++;
-    const now = Date.now();
-    
-    console.log(`📊 [PoE1 Stats #${poe1StatsRequestCount}] Request received`);
-    
-    // 캐시 확인
-    if (poe1StatsCache && (now - poe1StatsCache.timestamp) < STATS_CACHE_TTL) {
-      const cacheAge = Math.floor((now - poe1StatsCache.timestamp) / 1000 / 60);
-      console.log(`📦 [PoE1 Stats] Returning cache (age: ${cacheAge} min)`);
-      res.setHeader('X-Cache', 'HIT');
-      return res.json(poe1StatsCache.data);
-    }
-    
-    console.log('🔍 [PoE1 Stats] Fetching from API...');
-    
-    const response = await rateLimitedFetch(
-      'https://www.pathofexile.com/api/trade/data/stats',
-      {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'application/json',
-        },
-      },
-      { value: lastPoe1StatsRequest },
-      MIN_DELAY
-    );
-    
-    if (!response.ok) {
-      console.error(`❌ [PoE1 Stats] Error: ${response.status}`);
-      
-      if (response.status === 403 && poe1StatsCache) {
-        console.log('📦 [PoE1 Stats] Returning stale cache due to 403');
-        res.setHeader('X-Cache', 'STALE');
-        return res.json(poe1StatsCache.data);
-      }
-      
-      return res.status(response.status).json({
-        error: `PoE API returned ${response.status}`,
-      });
-    }
-    
-    const data = await response.json();
-    poe1StatsCache = { data, timestamp: now };
-    console.log('✅ [PoE1 Stats] Cached successfully');
-    
-    res.setHeader('X-Cache', 'MISS');
-    return res.json(data);
-    
-  } catch (error: any) {
-    console.error('💥 [PoE1 Stats] Exception:', error.message);
-    
-    if (poe1StatsCache) {
-      res.setHeader('X-Cache', 'ERROR-STALE');
-      return res.json(poe1StatsCache.data);
-    }
-    
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-// ============================================
-// PoE2 Stats API
-// ============================================
-app.get('/api/poe2/stats', async (req, res) => {
-  try {
-    poe2StatsRequestCount++;
-    const now = Date.now();
-    
-    console.log(`📊 [PoE2 Stats #${poe2StatsRequestCount}] Request received`);
-    
-    // 캐시 확인
-    if (poe2StatsCache && (now - poe2StatsCache.timestamp) < STATS_CACHE_TTL) {
-      const cacheAge = Math.floor((now - poe2StatsCache.timestamp) / 1000 / 60);
-      console.log(`📦 [PoE2 Stats] Returning cache (age: ${cacheAge} min)`);
-      res.setHeader('X-Cache', 'HIT');
-      return res.json(poe2StatsCache.data);
-    }
-    
-    console.log('🔍 [PoE2 Stats] Fetching from API...');
-    
-    // PoE2는 다른 도메인 사용
-    const response = await rateLimitedFetch(
-      'https://www.pathofexile.com/api/trade2/data/stats',
-      {
-        method: 'GET',
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'Accept': 'application/json',
-        },
-      },
-      { value: lastPoe2StatsRequest },
-      MIN_DELAY
-    );
-    
-    if (!response.ok) {
-      console.error(`❌ [PoE2 Stats] Error: ${response.status}`);
-      
-      if (response.status === 403 && poe2StatsCache) {
-        console.log('📦 [PoE2 Stats] Returning stale cache due to 403');
-        res.setHeader('X-Cache', 'STALE');
-        return res.json(poe2StatsCache.data);
-      }
-      
-      return res.status(response.status).json({
-        error: `PoE2 API returned ${response.status}`,
-      });
-    }
-    
-    const data = await response.json();
-    poe2StatsCache = { data, timestamp: now };
-    console.log('✅ [PoE2 Stats] Cached successfully');
-    
-    res.setHeader('X-Cache', 'MISS');
-    return res.json(data);
-    
-  } catch (error: any) {
-    console.error('💥 [PoE2 Stats] Exception:', error.message);
-    
-    if (poe2StatsCache) {
-      res.setHeader('X-Cache', 'ERROR-STALE');
-      return res.json(poe2StatsCache.data);
-    }
-    
-    return res.status(500).json({ error: error.message });
-  }
 });
 
 // ============================================
@@ -424,8 +269,6 @@ app.use((req, res) => {
 // ============================================
 app.listen(PORT, () => {
   console.log(`🚀 PoE API Proxy running on port ${PORT}`);
-  console.log(`📡 PoE1 Stats: /api/poe/stats`);
-  console.log(`📡 PoE2 Stats: /api/poe2/stats`);
   console.log(`🔍 PoE1 Search: POST /api/poe/search`);
   console.log(`🔍 PoE2 Search: POST /api/poe2/search`);
 });
