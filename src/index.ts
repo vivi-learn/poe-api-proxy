@@ -88,7 +88,7 @@ function handleHealth(): Response {
 async function handlePoe1Search(request: Request): Promise<Response> {
   try {
     searchRequestCount++;
-    const body = await request.json();
+    const body = await request.json() as { league?: string; query?: any; sort?: any; limit?: number };
     const { league, query, sort, limit } = body;
     
     console.log(`🔍 [PoE1 Search #${searchRequestCount}] ${league || 'Standard'}`);
@@ -122,7 +122,7 @@ async function handlePoe1Search(request: Request): Promise<Response> {
       );
     }
     
-    const searchData = await searchResponse.json();
+    const searchData = await searchResponse.json() as { id: string; result: string[]; total: number };
     
     if (searchData.result && searchData.result.length > 0) {
       const actualLimit = Math.min(Math.max(1, limit || 10), 10);
@@ -142,7 +142,7 @@ async function handlePoe1Search(request: Request): Promise<Response> {
       );
       
       if (fetchResponse.ok) {
-        const itemsData = await fetchResponse.json();
+        const itemsData = await fetchResponse.json() as { result: any[] };
         
         return jsonResponse({
           searchId: searchData.id,
@@ -179,7 +179,7 @@ async function handlePoe1Search(request: Request): Promise<Response> {
 // ============================================
 async function handlePoe2Search(request: Request): Promise<Response> {
   try {
-    const body = await request.json();
+    const body = await request.json() as { league?: string; query?: any; sort?: any; limit?: number };
     const { league, query, sort, limit } = body;
     
     console.log(`🔍 [PoE2 Search] ${league || 'Standard'}`);
@@ -213,7 +213,7 @@ async function handlePoe2Search(request: Request): Promise<Response> {
       );
     }
     
-    const searchData = await searchResponse.json();
+    const searchData = await searchResponse.json() as { id: string; result: string[]; total: number };
     
     if (searchData.result && searchData.result.length > 0) {
       const actualLimit = Math.min(Math.max(1, limit || 10), 10);
@@ -233,7 +233,7 @@ async function handlePoe2Search(request: Request): Promise<Response> {
       );
       
       if (fetchResponse.ok) {
-        const itemsData = await fetchResponse.json();
+        const itemsData = await fetchResponse.json() as { result: any[] };
         
         return jsonResponse({
           searchId: searchData.id,

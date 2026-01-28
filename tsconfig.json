@@ -12,8 +12,8 @@
     "moduleResolution": "node",
     "types": ["@cloudflare/workers-types"]
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules"]
+  "include": ["src/index.ts"],
+  "exclude": ["node_modules", "src/server.ts"]
 }
 
 
